@@ -41,7 +41,7 @@ rsync flags (all rsync jobs use the same set):
   --delete       mirror source — files removed on host are removed on USB
 
 Immich and KeePass use Borg instead of rsync — each has its own repo and its
-own retention (BORG_KEEP_* / KEEPASS_KEEP_* in settings.py). Requires
+own retention (IMMICH_KEEP_* / KEEPASS_KEEP_* in settings.py). Requires
 BORG_PASSPHRASE set in settings.py (same passphrase, both repos) and the
 borg binary installed (apt install borgbackup).
 
@@ -571,8 +571,8 @@ def cmd_run(*, dry_run: bool, skip_immich: bool) -> None:
                 die("--dry-run only applies to immich backup")
             borg_backup(
                 "immich", IMMICH_PATH, IMMICH_BORG_REPO,
-                keep_daily=BORG_KEEP_DAILY, keep_weekly=BORG_KEEP_WEEKLY,
-                keep_monthly=BORG_KEEP_MONTHLY, dry_run=True,
+                keep_daily=IMMICH_KEEP_DAILY, keep_weekly=IMMICH_KEEP_WEEKLY,
+                keep_monthly=IMMICH_KEEP_MONTHLY, dry_run=True,
             )
             note("OK — immich dry run done")
             return
@@ -603,8 +603,8 @@ def cmd_run(*, dry_run: bool, skip_immich: bool) -> None:
         if not skip_immich and not SKIP_IMMICH:
             borg_backup(
                 "immich", IMMICH_PATH, IMMICH_BORG_REPO,
-                keep_daily=BORG_KEEP_DAILY, keep_weekly=BORG_KEEP_WEEKLY,
-                keep_monthly=BORG_KEEP_MONTHLY,
+                keep_daily=IMMICH_KEEP_DAILY, keep_weekly=IMMICH_KEEP_WEEKLY,
+                keep_monthly=IMMICH_KEEP_MONTHLY,
             )
         else:
             note("--- immich skipped ---")

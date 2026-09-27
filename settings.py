@@ -15,27 +15,30 @@ IMMICH_PATH = "/mnt/sata_thin_pool/immich_data"
 TOOLKIT_PATH = "/opt/homelab-toolkit"
 
 # =============================================================================
-# Immich Backup (Borg)
+# Borg (shared across all Borg-backed sources below)
 # =============================================================================
-# Immich is backed up with Borg instead of rsync: deduplicated, encrypted,
-# and versioned (multiple restore points instead of one mirrored copy).
-#
-# BORG_PASSPHRASE is required — the repo cannot be created or opened without
-# it. Since it lives here in plain text, lock this file down:
+# BORG_PASSPHRASE is required — no repo can be created or opened without it.
+# Since it lives here in plain text, lock this file down:
 #   chmod 600 settings.py
 # Back this passphrase up somewhere OTHER than this USB drive — if it's lost,
-# the Immich backups on the drive become permanently unreadable.
+# every Borg repo on the drive becomes permanently unreadable.
 
-BORG_PASSPHRASE = ""             # set before first run
-BORG_KEEP_DAILY = 7
-BORG_KEEP_WEEKLY = 4
-BORG_KEEP_MONTHLY = 6
+BORG_PASSPHRASE = ""             # set before first run — shared by every Borg repo
+
+# =============================================================================
+# Immich Backup (Borg)
+# =============================================================================
+# Deduplicated, encrypted, versioned — own repo, own retention.
+
+IMMICH_KEEP_DAILY = 7
+IMMICH_KEEP_WEEKLY = 4
+IMMICH_KEEP_MONTHLY = 6
 
 # =============================================================================
 # KeePass Backup (Borg)
 # =============================================================================
 # Own repo, own retention — tiny data, so keeping a lot of history costs
-# almost nothing in space. Same BORG_PASSPHRASE is reused for this repo.
+# almost nothing in space.
 
 KEEPASS_PATH = "/mnt/sata_thin_pool/keepass_dbs"
 KEEPASS_KEEP_DAILY = 30
