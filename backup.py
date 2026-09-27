@@ -25,10 +25,11 @@ USB layout:
   /mnt/usb_backup/
     backup.info   <- drive label (created by init, updated each run)
     homelab-backup/
-      immich-borg/  <- Immich photos (Borg repo — encrypted, deduplicated)
-      pve/          <- host config (/etc/pve, network, fstab, /root, homelab-toolkit)
-      logs/         <- one .log file per run
-      vzdump/       <- VM + LXC archives
+      immich-borg/   <- Immich photos (Borg repo — encrypted, deduplicated)
+      keepass-borg/  <- KeePass DBs (Borg repo — separate, long retention)
+      pve/           <- host config (/etc/pve, network, fstab, /root, homelab-toolkit)
+      logs/          <- one .log file per run
+      vzdump/        <- VM + LXC archives
 
 rsync flags (all rsync jobs use the same set):
   -a            archive mode (perms, times, symlinks, recursion)
@@ -39,13 +40,14 @@ rsync flags (all rsync jobs use the same set):
   --info=progress2  one updating progress line for the whole transfer
   --delete       mirror source — files removed on host are removed on USB
 
-Immich uses Borg instead of rsync — every run is a new dated snapshot, kept
-per BORG_KEEP_DAILY/WEEKLY/MONTHLY in settings.py, instead of one mirrored
-copy. Requires BORG_PASSPHRASE set in settings.py (see comment there) and
-the borg binary installed (apt install borgbackup).
+Immich and KeePass use Borg instead of rsync — each has its own repo and its
+own retention (BORG_KEEP_* / KEEPASS_KEEP_* in settings.py). Requires
+BORG_PASSPHRASE set in settings.py (same passphrase, both repos) and the
+borg binary installed (apt install borgbackup).
 
-List Immich snapshots:
+List snapshots:
   BORG_PASSPHRASE=... borg list /mnt/usb_backup/homelab-backup/immich-borg
+  BORG_PASSPHRASE=... borg list /mnt/usb_backup/homelab-backup/keepass-borg
 
 Restore a whole library (run from the destination directory):
   cd /mnt/sata_thin_pool/immich_data
@@ -74,7 +76,8 @@ MP = Path(MOUNT_POINT)
 ROOT = MP / BACKUP_ROOT
 INFO = MP / "backup.info"
 LOG_DIR = ROOT / "logs"
-BORG_REPO = ROOT / "immich-borg"
+IMMICH_BORG_REPO = ROOT / "immich-borg"
+KEEPASS_BORG_REPO = ROOT / "keepass-borg"
 DUMP_SUFFIXES = (".tar.zst", ".vma.zst")
 RSYNC = ["rsync", "-aHAX", "--numeric-ids", "--info=progress2", "--delete"]
 BACKUP_INFO_ORDER = (
@@ -210,6 +213,7 @@ def collect_folder_sizes() -> dict[str, str]:
     labels = {
         "pve": "Host Config",
         "immich-borg": "Immich",
+        "keepass-borg": "KeePass",
         "vzdump": "Vzdump",
         "logs": "Logs",
     }
@@ -419,26 +423,35 @@ def borg_env() -> dict[str, str]:
     return env
 
 
-def borg_repo_initialized() -> bool:
-    return (BORG_REPO / "config").is_file()
+def borg_repo_initialized(repo: Path) -> bool:
+    return (repo / "config").is_file()
 
 
-def borg_init_repo() -> None:
+def borg_init_repo(repo: Path) -> None:
     need_borg()
-    BORG_REPO.parent.mkdir(parents=True, exist_ok=True)
-    if borg_repo_initialized():
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    if borg_repo_initialized(repo):
         return
-    note(f"initializing borg repo: {BORG_REPO}")
-    run(["borg", "init", "--encryption=repokey-blake2", str(BORG_REPO)], env=borg_env())
+    note(f"initializing borg repo: {repo}")
+    run(["borg", "init", "--encryption=repokey-blake2", str(repo)], env=borg_env())
 
 
-def borg_backup_immich(*, dry_run: bool = False) -> None:
-    src = Path(IMMICH_PATH)
+def borg_backup(
+    label: str,
+    src_path: str,
+    repo: Path,
+    *,
+    keep_daily: int,
+    keep_weekly: int,
+    keep_monthly: int,
+    dry_run: bool = False,
+) -> None:
+    src = Path(src_path)
     if not src.exists():
         die(f"missing: {src}")
-    borg_init_repo()
+    borg_init_repo(repo)
 
-    archive = f"{BORG_REPO}::{HOSTNAME}-{{now:%Y-%m-%d_%H-%M-%S}}"
+    archive = f"{repo}::{HOSTNAME}-{{now:%Y-%m-%d_%H-%M-%S}}"
     if dry_run:
         # borg's --dry-run does a real scan against the last archive without
         # writing anything — closest equivalent to rsync -n for this.
@@ -446,18 +459,20 @@ def borg_backup_immich(*, dry_run: bool = False) -> None:
             stream=True, env=borg_env())
         return
 
+    note(f"--- {label} (borg) ---")
     run(["borg", "create", "--stats", "--compression", "lz4", archive, str(src)],
         stream=True, env=borg_env())
     run(
         ["borg", "prune",
-         "--keep-daily", str(BORG_KEEP_DAILY),
-         "--keep-weekly", str(BORG_KEEP_WEEKLY),
-         "--keep-monthly", str(BORG_KEEP_MONTHLY),
-         "--stats", str(BORG_REPO)],
+         "--keep-daily", str(keep_daily),
+         "--keep-weekly", str(keep_weekly),
+         "--keep-monthly", str(keep_monthly),
+         "--stats", str(repo)],
         stream=True, env=borg_env(),
     )
     # prune only marks old data deletable; compact reclaims the actual space.
-    run(["borg", "compact", str(BORG_REPO)], stream=True, env=borg_env())
+    run(["borg", "compact", str(repo)], stream=True, env=borg_env())
+
 
 
 def format_size_lines(sizes: dict[str, str]) -> list[str]:
@@ -465,6 +480,7 @@ def format_size_lines(sizes: dict[str, str]) -> list[str]:
     display = (
         ("Host Config", "pve"),
         ("Immich", "immich-borg"),
+        ("KeePass", "keepass-borg"),
         ("Vzdump", "vzdump"),
         ("Logs", "logs"),
         ("Total Size", "total"),
@@ -527,7 +543,8 @@ def cmd_init() -> None:
         for d in ("pve", "logs", "vzdump"):
             (ROOT / d).mkdir(parents=True, exist_ok=True)
         init_backup_info()
-        borg_init_repo()
+        borg_init_repo(IMMICH_BORG_REPO)
+        borg_init_repo(KEEPASS_BORG_REPO)
         flush_disk()
         note("OK — folders created (drive was not formatted)")
     finally:
@@ -552,7 +569,11 @@ def cmd_run(*, dry_run: bool, skip_immich: bool) -> None:
         if dry_run:
             if skip_immich:
                 die("--dry-run only applies to immich backup")
-            borg_backup_immich(dry_run=True)
+            borg_backup(
+                "immich", IMMICH_PATH, IMMICH_BORG_REPO,
+                keep_daily=BORG_KEEP_DAILY, keep_weekly=BORG_KEEP_WEEKLY,
+                keep_monthly=BORG_KEEP_MONTHLY, dry_run=True,
+            )
             note("OK — immich dry run done")
             return
 
@@ -580,10 +601,22 @@ def cmd_run(*, dry_run: bool, skip_immich: bool) -> None:
             backed_up.append(vmid)
 
         if not skip_immich and not SKIP_IMMICH:
-            note("--- immich (borg) ---")
-            borg_backup_immich()
+            borg_backup(
+                "immich", IMMICH_PATH, IMMICH_BORG_REPO,
+                keep_daily=BORG_KEEP_DAILY, keep_weekly=BORG_KEEP_WEEKLY,
+                keep_monthly=BORG_KEEP_MONTHLY,
+            )
         else:
             note("--- immich skipped ---")
+
+        if not SKIP_KEEPASS:
+            borg_backup(
+                "keepass", KEEPASS_PATH, KEEPASS_BORG_REPO,
+                keep_daily=KEEPASS_KEEP_DAILY, keep_weekly=KEEPASS_KEEP_WEEKLY,
+                keep_monthly=KEEPASS_KEEP_MONTHLY,
+            )
+        else:
+            note("--- keepass skipped ---")
 
         prune_old_logs()
         elapsed = time.monotonic() - started

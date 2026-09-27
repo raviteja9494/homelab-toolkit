@@ -32,6 +32,18 @@ BORG_KEEP_WEEKLY = 4
 BORG_KEEP_MONTHLY = 6
 
 # =============================================================================
+# KeePass Backup (Borg)
+# =============================================================================
+# Own repo, own retention — tiny data, so keeping a lot of history costs
+# almost nothing in space. Same BORG_PASSPHRASE is reused for this repo.
+
+KEEPASS_PATH = "/mnt/sata_thin_pool/keepass_dbs"
+KEEPASS_KEEP_DAILY = 30
+KEEPASS_KEEP_WEEKLY = 12
+KEEPASS_KEEP_MONTHLY = 24
+SKIP_KEEPASS = False
+
+# =============================================================================
 # Backup Behaviour
 # =============================================================================
 
@@ -49,4 +61,4 @@ SKIP_IMMICH = False
 # Toolkit
 # =============================================================================
 
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.3.0"
