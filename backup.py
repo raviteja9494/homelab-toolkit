@@ -6,7 +6,7 @@ Usage:
   sudo python3 backup.py init
   sudo python3 backup.py run
   sudo python3 backup.py run --skip-immich
-  sudo python3 backup.py run --dry-run    # immich rsync preview only (-n)
+  sudo python3 backup.py run --dry-run    # immich preview only (borg --dry-run)
 
 Get USB UUID (plug drive in first):
   lsblk -f
@@ -25,7 +25,7 @@ USB layout:
   /mnt/usb_backup/
     backup.info   <- drive label (created by init, updated each run)
     homelab-backup/
-      immich/       <- Immich photos
+      immich-borg/  <- Immich photos (Borg repo — encrypted, deduplicated)
       pve/          <- host config (/etc/pve, network, fstab, /root, homelab-toolkit)
       logs/         <- one .log file per run
       vzdump/       <- VM + LXC archives
@@ -38,6 +38,18 @@ rsync flags (all rsync jobs use the same set):
   --numeric-ids  keep raw uid/gid (no name lookups)
   --info=progress2  one updating progress line for the whole transfer
   --delete       mirror source — files removed on host are removed on USB
+
+Immich uses Borg instead of rsync — every run is a new dated snapshot, kept
+per BORG_KEEP_DAILY/WEEKLY/MONTHLY in settings.py, instead of one mirrored
+copy. Requires BORG_PASSPHRASE set in settings.py (see comment there) and
+the borg binary installed (apt install borgbackup).
+
+List Immich snapshots:
+  BORG_PASSPHRASE=... borg list /mnt/usb_backup/homelab-backup/immich-borg
+
+Restore a whole library (run from the destination directory):
+  cd /mnt/sata_thin_pool/immich_data
+  BORG_PASSPHRASE=... borg extract /mnt/usb_backup/homelab-backup/immich-borg::<archive>
 """
 
 from __future__ import annotations
@@ -62,6 +74,7 @@ MP = Path(MOUNT_POINT)
 ROOT = MP / BACKUP_ROOT
 INFO = MP / "backup.info"
 LOG_DIR = ROOT / "logs"
+BORG_REPO = ROOT / "immich-borg"
 DUMP_SUFFIXES = (".tar.zst", ".vma.zst")
 RSYNC = ["rsync", "-aHAX", "--numeric-ids", "--info=progress2", "--delete"]
 BACKUP_INFO_ORDER = (
@@ -92,6 +105,7 @@ def run(
     *,
     check: bool = True,
     stream: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     note(f"  $ {' '.join(cmd)}")
     if stream:
@@ -101,6 +115,7 @@ def run(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
         )
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -113,7 +128,7 @@ def run(
             die(f"command failed ({result.returncode})")
         return result
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if check and result.returncode:
         die(result.stderr or result.stdout or f"exit {result.returncode}")
     return result
@@ -194,7 +209,7 @@ def collect_folder_sizes() -> dict[str, str]:
     """Return du -sh sizes keyed by backup.info field names."""
     labels = {
         "pve": "Host Config",
-        "immich": "Immich",
+        "immich-borg": "Immich",
         "vzdump": "Vzdump",
         "logs": "Logs",
     }
@@ -390,11 +405,66 @@ def rsync(src: Path, dst: Path, *, dry_run: bool = False) -> None:
     run(cmd, stream=True)
 
 
+def need_borg() -> None:
+    if shutil.which("borg") is None:
+        die("borg not found — install with: apt install borgbackup")
+
+
+def borg_env() -> dict[str, str]:
+    if not BORG_PASSPHRASE:
+        die("BORG_PASSPHRASE is not set in settings.py")
+    env = os.environ.copy()
+    env["BORG_PASSPHRASE"] = BORG_PASSPHRASE
+    env["BORG_RELOCATED_REPO_ACCESS_IS_OK"] = "yes"
+    return env
+
+
+def borg_repo_initialized() -> bool:
+    return (BORG_REPO / "config").is_file()
+
+
+def borg_init_repo() -> None:
+    need_borg()
+    BORG_REPO.parent.mkdir(parents=True, exist_ok=True)
+    if borg_repo_initialized():
+        return
+    note(f"initializing borg repo: {BORG_REPO}")
+    run(["borg", "init", "--encryption=repokey-blake2", str(BORG_REPO)], env=borg_env())
+
+
+def borg_backup_immich(*, dry_run: bool = False) -> None:
+    src = Path(IMMICH_PATH)
+    if not src.exists():
+        die(f"missing: {src}")
+    borg_init_repo()
+
+    archive = f"{BORG_REPO}::{HOSTNAME}-{{now:%Y-%m-%d_%H-%M-%S}}"
+    if dry_run:
+        # borg's --dry-run does a real scan against the last archive without
+        # writing anything — closest equivalent to rsync -n for this.
+        run(["borg", "create", "--dry-run", "--list", "--stats", archive, str(src)],
+            stream=True, env=borg_env())
+        return
+
+    run(["borg", "create", "--stats", "--compression", "lz4", archive, str(src)],
+        stream=True, env=borg_env())
+    run(
+        ["borg", "prune",
+         "--keep-daily", str(BORG_KEEP_DAILY),
+         "--keep-weekly", str(BORG_KEEP_WEEKLY),
+         "--keep-monthly", str(BORG_KEEP_MONTHLY),
+         "--stats", str(BORG_REPO)],
+        stream=True, env=borg_env(),
+    )
+    # prune only marks old data deletable; compact reclaims the actual space.
+    run(["borg", "compact", str(BORG_REPO)], stream=True, env=borg_env())
+
+
 def format_size_lines(sizes: dict[str, str]) -> list[str]:
     """Format collected sizes for console summary output."""
     display = (
         ("Host Config", "pve"),
-        ("Immich", "immich"),
+        ("Immich", "immich-borg"),
         ("Vzdump", "vzdump"),
         ("Logs", "logs"),
         ("Total Size", "total"),
@@ -454,9 +524,10 @@ def cmd_init() -> None:
     mount_usb()
     try:
         start_log("init")
-        for d in ("immich", "pve", "logs", "vzdump"):
+        for d in ("pve", "logs", "vzdump"):
             (ROOT / d).mkdir(parents=True, exist_ok=True)
         init_backup_info()
+        borg_init_repo()
         flush_disk()
         note("OK — folders created (drive was not formatted)")
     finally:
@@ -480,8 +551,8 @@ def cmd_run(*, dry_run: bool, skip_immich: bool) -> None:
 
         if dry_run:
             if skip_immich:
-                die("--dry-run only applies to immich rsync")
-            rsync(Path(IMMICH_PATH), ROOT / "immich", dry_run=True)
+                die("--dry-run only applies to immich backup")
+            borg_backup_immich(dry_run=True)
             note("OK — immich dry run done")
             return
 
@@ -509,8 +580,8 @@ def cmd_run(*, dry_run: bool, skip_immich: bool) -> None:
             backed_up.append(vmid)
 
         if not skip_immich and not SKIP_IMMICH:
-            note("--- immich ---")
-            rsync(Path(IMMICH_PATH), ROOT / "immich")
+            note("--- immich (borg) ---")
+            borg_backup_immich()
         else:
             note("--- immich skipped ---")
 
@@ -535,8 +606,8 @@ def cmd_run(*, dry_run: bool, skip_immich: bool) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description="minimal homelab backup")
     p.add_argument("cmd", choices=["init", "run"])
-    p.add_argument("--dry-run", action="store_true", help="immich rsync preview only (-n)")
-    p.add_argument("--skip-immich", action="store_true", help="skip immich rsync")
+    p.add_argument("--dry-run", action="store_true", help="immich preview only (borg --dry-run)")
+    p.add_argument("--skip-immich", action="store_true", help="skip immich backup")
     a = p.parse_args()
     if a.cmd == "init":
         cmd_init()
