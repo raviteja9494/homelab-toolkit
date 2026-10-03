@@ -18,7 +18,7 @@
   unchanged — still plain rsync
 
 ## 1.3.0
-- Added a second Borg repo for /mnt/sata_thin_pool/keepass_database, separate
+- Added a second Borg repo for /mnt/sata_thin_pool/keepass_dbs, separate
   from Immich's repo (own retention: KEEPASS_KEEP_DAILY/WEEKLY/MONTHLY,
   set long by default since the data is tiny — SKIP_KEEPASS to disable)
 - Refactored immich-only borg_backup_immich() into a generic borg_backup()
@@ -52,3 +52,9 @@
 - settings.py regrouped: drive, sources, encryption, retention, options;
   SCRIPT_VERSION moved into backup.py
 - README updated: Borg repos in layout, Python 3.9+, borg >= 1.2
+
+
+## 1.4.1
+- Fixed: crash at the very end of init/run/check — after unmounting the
+  drive, the final "safe to unplug" message tried to write to the log file
+  on the now-unmounted drive (FileNotFoundError traceback, exit code 1)

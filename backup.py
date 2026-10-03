@@ -85,7 +85,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 # -----------------------------------------------------------------------------
 # Derived paths (from settings.py)
@@ -232,9 +232,11 @@ def mount_usb() -> None:
 
 
 def unmount_usb() -> None:
+    global _log
     if is_mounted():
         flush_disk()
         run(["umount", str(MP)])
+        _log = None  # the log file lived on the drive that is now unmounted
         note("drive unmounted — safe to unplug")
 
 
